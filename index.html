@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PrivateEye — Shoulder Surfing Detector</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css?v=6" />
+
+<!-- TensorFlow.js + BlazeFace (versions verified to exist + be compatible) -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.21.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface@0.0.7/dist/blazeface.min.js"></script>
+</head>
+<body>
+
+<!-- Full-screen brightness dim — active while a peeker is present -->
+<div id="screenDim" class="screen-dim"></div>
+
+<!-- Floating notification with Accept (dim) / Deny (keep visible) prompt -->
+<div id="privacyBlur" class="privacy-blur" role="alertdialog" aria-labelledby="pbTitle">
+  <div class="pb-inner">
+    <div class="pb-icon">⚠️</div>
+    <div class="pb-body">
+      <h2 id="pbTitle">Someone is watching</h2>
+      <p>Dim the screen to protect your privacy?</p>
+    </div>
+    <div class="pb-actions">
+      <button class="pb-btn pb-deny"   onclick="denyDim()">Deny</button>
+      <button class="pb-btn pb-accept" onclick="acceptDim()">Accept</button>
+    </div>
+  </div>
+</div>
+
+<header class="topbar">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.2">
+      <circle cx="16" cy="16" r="6"/>
+      <path d="M2 16s5-9 14-9 14 9 14 9-5 9-14 9S2 16 2 16z"/>
+    </svg>
+    <div>
+      <h1>PrivateEye</h1>
+      <span class="sub">Shoulder Surfing Detector</span>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <div class="session-time">
+      <span class="muted">Session</span>
+      <strong id="sessionTime">00:00</strong>
+    </div>
+    <span class="privacy-pill">🔒 100% on-device</span>
+    <div class="theme-switch" role="radiogroup" aria-label="Theme">
+      <button type="button" class="theme-opt" data-theme="light">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="4"/>
+          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+        </svg>
+        Light
+      </button>
+      <button type="button" class="theme-opt" data-theme="dark">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+        </svg>
+        Dark
+      </button>
+    </div>
+  </div>
+</header>
+
+<main class="layout">
+
+  <!-- ============= LEFT: VIDEO + STATUS ============= -->
+  <section class="stage card">
+    <div class="video-wrap">
+      <video id="video" autoplay muted playsinline></video>
+      <canvas id="overlay"></canvas>
+
+      <div id="loading" class="loading">
+        <div class="spinner"></div>
+        <span id="loadingText">Loading face detection model…</span>
+      </div>
+
+      <!-- Floating FPS + face count chips -->
+      <div class="hud">
+        <span class="hud-chip"><span class="hud-dot"></span><strong id="hudFaces">0</strong> faces</span>
+        <span class="hud-chip"><strong id="hudFps">--</strong> fps</span>
+      </div>
+
+      <!-- Toast inside video -->
+      <div id="toast" class="toast"></div>
+    </div>
+
+    <!-- Status banner -->
+    <div id="status" class="status idle">
+      <span class="dot"></span>
+      <div class="status-text">
+        <strong id="statusTitle">Ready</strong>
+        <span id="statusSub">Click Start to begin monitoring.</span>
+      </div>
+    </div>
+
+    <!-- Controls -->
+    <div class="controls">
+      <button id="startBtn" class="btn primary big">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        Start monitoring
+      </button>
+      <button id="stopBtn" class="btn ghost big" disabled>
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><rect x="6" y="6" width="12" height="12"/></svg>
+        Stop
+      </button>
+      <button id="snapBtn" class="btn ghost" disabled title="Take a snapshot">
+        📸 Snapshot
+      </button>
+      <button id="cameraBtn" class="btn ghost" disabled title="Switch camera">
+        🔄 Switch camera
+      </button>
+    </div>
+  </section>
+
+  <!-- ============= RIGHT: PANELS ============= -->
+  <aside class="side">
+
+    <!-- Stat tiles -->
+    <div class="stats">
+      <div class="stat-tile">
+        <div class="stat-label">Total alerts</div>
+        <div class="stat-value danger" id="alertCount">0</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-label">Faces now</div>
+        <div class="stat-value" id="liveFaces">0</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-label">Status</div>
+        <div class="stat-value safe" id="liveStatus">Idle</div>
+      </div>
+    </div>
+
+    <!-- Settings -->
+    <div class="card panel">
+      <div class="panel-head">
+        <h3>⚙ Settings</h3>
+      </div>
+
+      <div class="setting">
+        <div>
+          <strong>Sensitivity</strong>
+          <span class="muted">Frames before alert · <span id="sensValue">3</span></span>
+        </div>
+        <input id="sensitivity" type="range" min="1" max="10" value="3" />
+      </div>
+
+      <label class="setting toggle">
+        <div>
+          <strong>Sound alert</strong>
+          <span class="muted">Beep when warning triggers</span>
+        </div>
+        <input id="soundToggle" type="checkbox" checked />
+        <span class="switch"></span>
+      </label>
+
+      <label class="setting toggle">
+        <div>
+          <strong>Show dim prompt</strong>
+          <span class="muted">Ask to dim screen on alert</span>
+        </div>
+        <input id="blurToggle" type="checkbox" checked />
+        <span class="switch"></span>
+      </label>
+
+      <label class="setting toggle">
+        <div>
+          <strong>Auto snapshot</strong>
+          <span class="muted">Save image when alert fires</span>
+        </div>
+        <input id="snapToggle" type="checkbox" checked />
+        <span class="switch"></span>
+      </label>
+
+      <label class="setting toggle">
+        <div>
+          <strong>Desktop notifications</strong>
+          <span class="muted">Alert even in background tab</span>
+        </div>
+        <input id="notifToggle" type="checkbox" />
+        <span class="switch"></span>
+      </label>
+    </div>
+
+    <!-- Alert log -->
+    <div class="card panel">
+      <div class="panel-head">
+        <h3>📋 Alert history</h3>
+        <button class="link-btn" onclick="clearLog()">Clear</button>
+      </div>
+      <ul id="alertLog" class="log">
+        <li class="log-empty">No alerts yet. You're safe.</li>
+      </ul>
+    </div>
+
+    <!-- How it works -->
+    <div class="card panel info">
+      <h3>How it works</h3>
+      <ol>
+        <li>BlazeFace runs locally in your browser at ~30 fps.</li>
+        <li>If faces stay above 1 for the sensitivity threshold, a warning fires.</li>
+        <li>The page blurs, a snapshot is captured, an alarm sounds.</li>
+        <li>Click <em>I'm alone now</em> to dismiss.</li>
+      </ol>
+      <p class="note">Nothing leaves your machine. Snapshots stay in your browser memory and download only if you save them.</p>
+    </div>
+
+  </aside>
+</main>
+
+<footer>
+  Built with TensorFlow.js · BlazeFace · 100% client-side privacy.
+</footer>
+
+<script src="app.js?v=7"></script>
+</body>
+</html>
